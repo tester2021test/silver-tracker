@@ -1,5 +1,6 @@
 yfinance
 pandas
-pandas_ta
+numpy
 pytz
 requests
+pandas-ta==0.3.14b0
