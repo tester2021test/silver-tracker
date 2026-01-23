@@ -1,5 +1,5 @@
 # ============================================================
-# 💎 Ultimate Silver Tracker (GitHub Actions – Production Safe)
+# 💎 Ultimate Silver Tracker (GitHub Actions – Stable Final)
 # ============================================================
 
 import yfinance as yf
@@ -39,13 +39,16 @@ def get_live_prev(symbol):
     df = yf.Ticker(symbol).history(period="5d", auto_adjust=True)
     if df.empty:
         return 0.0, 0.0
-    if len(df) == 1:
-        close = float(df["Close"].iloc[-1])
-        return close, close
-    return float(df["Close"].iloc[-1]), float(df["Close"].iloc[-2])
+    close = df["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    if len(close) == 1:
+        return float(close.iloc[-1]), float(close.iloc[-1])
+    return float(close.iloc[-1]), float(close.iloc[-2])
 
-# ===================== RSI (MANUAL & STABLE) =====================
+# ===================== RSI (MANUAL & SAFE) =====================
 def calculate_rsi(series, period=14):
+    series = series.astype(float)
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -61,7 +64,6 @@ def calculate_rsi(series, period=14):
 def save_csv(row):
     file = Path("silver_history.csv")
     write_header = not file.exists()
-
     with file.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=row.keys())
         if write_header:
@@ -84,28 +86,33 @@ def main():
         live[k], prev[k] = get_live_prev(sym)
 
     # ---------- Intraday data for RSI ----------
-    etf_intra = yf.download(
+    raw = yf.download(
         "TATSILV.NS",
         period="5d",
         interval="15m",
         auto_adjust=True,
         progress=False
-    )["Close"].dropna()
+    )
+
+    if raw.empty:
+        etf_close = pd.Series(dtype=float)
+    else:
+        etf_close = raw["Close"]
+        if isinstance(etf_close, pd.DataFrame):
+            etf_close = etf_close.iloc[:, 0]
+        etf_close = etf_close.dropna()
 
     rsi = 50.0
-    if len(etf_intra) > 14:
-        rsi_series = calculate_rsi(etf_intra, 14)
-        if not rsi_series.dropna().empty:
-            rsi = float(rsi_series.dropna().iloc[-1])
+    if len(etf_close) > 14:
+        rsi_series = calculate_rsi(etf_close, 14)
+        last_rsi = rsi_series.dropna()
+        if not last_rsi.empty:
+            rsi = float(last_rsi.iloc[-1])
 
     # ---------- Silver move ----------
     prev_inr = prev["Silver_Global"] * prev["USD_INR"]
     curr_inr = live["Silver_Global"] * live["USD_INR"]
-
-    silver_move_pct = (
-        (curr_inr - prev_inr) / prev_inr
-        if prev_inr > 0 else 0.0
-    )
+    silver_move_pct = (curr_inr - prev_inr) / prev_inr if prev_inr > 0 else 0.0
 
     # ---------- ETF Fair iNAV ----------
     fair_inav = prev["ETF"] * (1 + silver_move_pct) if prev["ETF"] > 0 else 0.0
@@ -117,11 +124,11 @@ def main():
     # ---------- Market Phase ----------
     ist = pytz.timezone("Asia/Kolkata")
     now = datetime.now(ist)
-    current_time = now.time()
+    t = now.time()
 
-    if current_time < time(9, 15):
+    if t < time(9, 15):
         market_phase = "PRE-MARKET"
-    elif current_time > time(15, 30):
+    elif t > time(15, 30):
         market_phase = "POST-MARKET"
     else:
         market_phase = "LIVE"
@@ -144,7 +151,7 @@ def main():
         "signal": signal
     })
 
-    # ---------- Telegram Alert (ONLY if |premium| ≥ 2%) ----------
+    # ---------- Telegram Alert ----------
     if abs(premium_pct) >= 2:
         send_telegram(
             f"🚨 *Silver ETF Alert*\n\n"
