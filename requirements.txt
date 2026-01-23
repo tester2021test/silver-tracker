@@ -3,4 +3,3 @@ pandas
 numpy
 pytz
 requests
-pandas-ta==0.3.14b0
