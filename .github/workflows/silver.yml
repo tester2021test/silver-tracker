@@ -29,10 +29,12 @@ jobs:
         run: |
           python silver_tracker.py
 
-      - name: Commit CSV
+      - name: Commit CSV safely
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
+
+          git pull --rebase origin main || true
           git add silver_history.csv || true
           git commit -m "Update silver history" || true
-          git push || true
+          git push origin main || true
