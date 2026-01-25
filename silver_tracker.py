@@ -17,36 +17,53 @@ KG_CONVERSION = 32.1507466
 IMPORT_DUTY = 0.06
 GST_RATE = 0.03
 
-# ===================== TELEGRAM =====================
+# ===================== TELEGRAM (FIXED & SAFE) =====================
 def send_telegram(message):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
     if not token or not chat_id:
+        print("❌ Telegram credentials missing")
         return
+
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.post(
-        url,
-        json={
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "Markdown"
-        },
-        timeout=10
-    )
+
+    try:
+        response = requests.post(
+            url,
+            json={
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True
+            },
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            print("❌ Telegram API Error:", response.text)
+        else:
+            print("📨 Telegram message sent")
+
+    except Exception as e:
+        print("❌ Telegram exception:", str(e))
 
 # ===================== SAFE PRICE FETCH =====================
 def get_live_prev(symbol):
     df = yf.Ticker(symbol).history(period="5d", auto_adjust=True)
     if df.empty:
         return 0.0, 0.0
+
     close = df["Close"]
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
+
     if len(close) == 1:
         return float(close.iloc[-1]), float(close.iloc[-1])
+
     return float(close.iloc[-1]), float(close.iloc[-2])
 
-# ===================== RSI (MANUAL & SAFE) =====================
+# ===================== RSI =====================
 def calculate_rsi(series, period=14):
     series = series.astype(float)
     delta = series.diff()
@@ -57,20 +74,20 @@ def calculate_rsi(series, period=14):
     avg_loss = loss.rolling(period).mean()
 
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
-# ===================== CSV STORAGE =====================
+# ===================== CSV =====================
 def save_csv(row):
     file = Path("silver_history.csv")
     write_header = not file.exists()
+
     with file.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=row.keys())
         if write_header:
             writer.writeheader()
         writer.writerow(row)
 
-# ===================== MAIN ENGINE =====================
+# ===================== MAIN =====================
 def main():
     print("⏳ Running Silver Tracker...")
 
@@ -85,7 +102,7 @@ def main():
     for k, sym in tickers.items():
         live[k], prev[k] = get_live_prev(sym)
 
-    # ---------- Intraday data for RSI ----------
+    # ---------- RSI ----------
     raw = yf.download(
         "TATSILV.NS",
         period="5d",
@@ -94,32 +111,24 @@ def main():
         progress=False
     )
 
-    if raw.empty:
-        etf_close = pd.Series(dtype=float)
-    else:
-        etf_close = raw["Close"]
-        if isinstance(etf_close, pd.DataFrame):
-            etf_close = etf_close.iloc[:, 0]
-        etf_close = etf_close.dropna()
-
     rsi = 50.0
-    if len(etf_close) > 14:
-        rsi_series = calculate_rsi(etf_close, 14)
-        last_rsi = rsi_series.dropna()
-        if not last_rsi.empty:
-            rsi = float(last_rsi.iloc[-1])
+    if not raw.empty:
+        close = raw["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
 
-    # ---------- Silver move ----------
+        if len(close) > 14:
+            rsi_series = calculate_rsi(close)
+            rsi = float(rsi_series.dropna().iloc[-1])
+
+    # ---------- Silver Move ----------
     prev_inr = prev["Silver_Global"] * prev["USD_INR"]
     curr_inr = live["Silver_Global"] * live["USD_INR"]
-    silver_move_pct = (curr_inr - prev_inr) / prev_inr if prev_inr > 0 else 0.0
+    silver_move_pct = (curr_inr - prev_inr) / prev_inr if prev_inr else 0.0
 
-    # ---------- ETF Fair iNAV ----------
-    fair_inav = prev["ETF"] * (1 + silver_move_pct) if prev["ETF"] > 0 else 0.0
-    premium_pct = (
-        (live["ETF"] - fair_inav) / fair_inav * 100
-        if fair_inav > 0 else 0.0
-    )
+    fair_inav = prev["ETF"] * (1 + silver_move_pct) if prev["ETF"] else 0.0
+    premium_pct = ((live["ETF"] - fair_inav) / fair_inav * 100) if fair_inav else 0.0
 
     # ---------- Market Phase ----------
     ist = pytz.timezone("Asia/Kolkata")
@@ -140,7 +149,7 @@ def main():
     elif premium_pct >= 2:
         signal = "AVOID / PROFIT BOOK"
 
-    # ---------- Save History ----------
+    # ---------- Save ----------
     save_csv({
         "timestamp": now.isoformat(),
         "market_phase": market_phase,
@@ -151,19 +160,21 @@ def main():
         "signal": signal
     })
 
-    # ---------- Telegram Alert ----------
-    if abs(premium_pct) >= 2:
-        send_telegram(
-            f"🚨 *Silver ETF Alert*\n\n"
-            f"🕒 Phase: *{market_phase}*\n"
-            f"ETF Price: ₹{live['ETF']:.2f}\n"
-            f"Fair iNAV: ₹{fair_inav:.2f}\n"
-            f"Premium: *{premium_pct:+.2f}%*\n"
-            f"RSI (15m): {rsi:.1f}\n"
-            f"Signal: *{signal}*"
-        )
+    # ===================== ALWAYS SEND TELEGRAM 🔥 =====================
+    alert_tag = "🚨 ALERT" if abs(premium_pct) >= 2 else "📊 UPDATE"
 
-    print(f"✅ Completed | {now.strftime('%Y-%m-%d %H:%M:%S IST')}")
+    send_telegram(
+        f"{alert_tag} *Silver ETF Tracker*\n\n"
+        f"🕒 Phase: *{market_phase}*\n"
+        f"ETF: ₹{live['ETF']:.2f}\n"
+        f"Fair iNAV: ₹{fair_inav:.2f}\n"
+        f"Premium: *{premium_pct:+.2f}%*\n"
+        f"RSI (15m): {rsi:.1f}\n"
+        f"Signal: *{signal}*\n"
+        f"_Updated: {now.strftime('%d-%b %H:%M IST')}_"
+    )
+
+    print("✅ Completed")
 
 # ===================== RUN =====================
 if __name__ == "__main__":
