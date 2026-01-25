@@ -11,12 +11,7 @@ import csv
 from pathlib import Path
 from datetime import datetime, time
 
-# ===================== CONFIG =====================
-KG_CONVERSION = 32.1507466
-IMPORT_DUTY = 0.06
-GST_RATE = 0.03
-
-# ===================== TELEGRAM (SAFE & LOGGED) =====================
+# ===================== TELEGRAM =====================
 def send_telegram(message):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -32,7 +27,7 @@ def send_telegram(message):
             url,
             json={
                 "chat_id": chat_id,
-                "text": message  # ❗ NO markdown (safe)
+                "text": message
             },
             timeout=10
         )
@@ -46,22 +41,27 @@ def send_telegram(message):
         print("❌ Telegram exception:", str(e))
 
 
-# ===================== SAFE PRICE FETCH =====================
+# ===================== PRICE FETCH =====================
 def get_live_prev(symbol):
     df = yf.Ticker(symbol).history(period="5d", auto_adjust=True)
     if df.empty:
         return 0.0, 0.0
 
     close = df["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+
     if len(close) == 1:
         return float(close.iloc[-1]), float(close.iloc[-1])
 
     return float(close.iloc[-1]), float(close.iloc[-2])
 
 
-# ===================== RSI (SAFE) =====================
+# ===================== RSI =====================
 def calculate_rsi(series, period=14):
+    series = series.astype(float)
     delta = series.diff()
+
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
@@ -73,7 +73,7 @@ def calculate_rsi(series, period=14):
     return rsi
 
 
-# ===================== CSV STORAGE =====================
+# ===================== CSV =====================
 def save_csv(row):
     file = Path("silver_history.csv")
     write_header = not file.exists()
@@ -85,18 +85,15 @@ def save_csv(row):
         writer.writerow(row)
 
 
-# ===================== MAIN ENGINE =====================
+# ===================== MAIN =====================
 def main():
     print("⏳ Running Silver Tracker...")
-
-    # 🔔 Startup heartbeat (for testing & monitoring)
     send_telegram("🧪 Silver Tracker run started")
 
     tickers = {
         "Silver_Global": "SI=F",
         "USD_INR": "INR=X",
-        "ETF": "TATSILV.NS",
-        "India_VIX": "^INDIAVIX"
+        "ETF": "TATSILV.NS"
     }
 
     live, prev = {}, {}
@@ -114,14 +111,22 @@ def main():
 
     rsi = 50.0
     if not raw.empty:
-        close = raw["Close"].dropna()
+        close = raw["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+
+        close = close.dropna()
+
         if len(close) > 14:
             rsi_series = calculate_rsi(close, 14)
-            rsi = float(rsi_series.dropna().iloc[-1])
+            last_valid = rsi_series.dropna()
+            if not last_valid.empty:
+                rsi = float(last_valid.iloc[-1])
 
     # ---------- Silver move ----------
     prev_inr = prev["Silver_Global"] * prev["USD_INR"]
     curr_inr = live["Silver_Global"] * live["USD_INR"]
+
     silver_move_pct = (curr_inr - prev_inr) / prev_inr if prev_inr > 0 else 0.0
 
     # ---------- Fair iNAV ----------
