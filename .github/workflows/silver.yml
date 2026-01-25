@@ -22,24 +22,6 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      # 🔍 DEBUG STEP (TEMPORARY – IMPORTANT)
-      - name: Debug Telegram secrets
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "❌ TELEGRAM_BOT_TOKEN is NOT set"
-          else
-            echo "✅ TELEGRAM_BOT_TOKEN is set"
-          fi
-
-          if [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "❌ TELEGRAM_CHAT_ID is NOT set"
-          else
-            echo "✅ TELEGRAM_CHAT_ID is set"
-          fi
-
       - name: Run silver tracker
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -54,5 +36,5 @@ jobs:
 
           git pull --rebase origin main || true
           git add silver_history.csv || true
-          git diff --quiet || git commit -m "Update silver history"
+          git commit -m "Update silver history" || true
           git push origin main || true
