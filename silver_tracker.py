@@ -2,7 +2,8 @@
 TATSILVER ETF Tracker
 - Tracks TATSILV.NS (Tata Silver ETF) via Yahoo Finance
 - Calculates iNAV using international silver spot price + USD/INR
-- iNAV formula: (Silver_USD_per_troy_oz × USD_INR) / 31.1035 grams_per_oz × 1 gram_per_unit
+- iNAV formula: (Silver_USD_per_troy_oz x USD_INR) / 31.1035 x 0.1 gram_per_unit
+- TATSILVER: 1 unit = 0.1 gram of silver (verified from fund factsheet)
 - Reports premium/discount, buy/sell suggestion, dollar rate
 - Sends Telegram alert and updates GitHub CSV on every run
 """
@@ -20,7 +21,7 @@ import pytz
 # CONSTANTS
 # ─────────────────────────────────────────────
 TROY_OZ_TO_GRAM     = 31.1035     # grams in 1 troy ounce
-SILVER_GRAMS_PER_UNIT = 1.0       # TATSILVER: 1 unit ≈ 1 gram silver
+SILVER_GRAMS_PER_UNIT = 0.1       # TATSILVER: 1 unit = 0.1 gram silver (verified from factsheet)
 EXPENSE_RATIO       = 0.0044      # 0.44% annual; used to adjust iNAV if desired
 CSV_FILE            = "tatsilver_log.csv"
 IST                 = pytz.timezone("Asia/Kolkata")
@@ -102,32 +103,35 @@ def send_telegram(message: str):
     token   = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
-        print("⚠️  Telegram credentials missing — skipping notification.")
+        print("Warning: Telegram credentials missing - skipping notification.")
         return
     url     = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+    # No parse_mode - plain text avoids 400 errors from special chars (rupee, emojis in tags)
+    payload = {"chat_id": chat_id, "text": message}
     try:
         resp = requests.post(url, json=payload, timeout=15)
         resp.raise_for_status()
-        print(f"✅ Telegram sent (status {resp.status_code})")
+        print(f"Telegram sent OK (status {resp.status_code})")
+    except requests.exceptions.HTTPError as e:
+        # Print full response body for easier debugging
+        print(f"Telegram HTTP error: {e} | Response: {resp.text}")
     except Exception as e:
-        print(f"❌ Telegram error: {e}")
+        print(f"Telegram error: {e}")
 
 
 def build_telegram_message(data: dict) -> str:
     pct   = data["premium_discount_pct"]
-    arrow = "🔺" if pct > 0 else "🔻"
+    arrow = "UP" if pct > 0 else "DN"
+    sig   = data["suggestion"]
     return (
-        f"<b>🥈 TATSILVER Tracker</b>\n"
-        f"⏰ {data['timestamp']}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"💰 ETF Price : ₹{data['etf_price_inr']}\n"
-        f"📊 iNAV      : ₹{data['inav_inr']}\n"
-        f"{arrow} Prem/Disc  : {pct:+.2f}%\n"
-        f"💵 USD/INR   : ₹{data['usd_inr']}\n"
-        f"🪙 Silver    : ${data['silver_usd_oz']}/oz\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"🎯 {data['suggestion']}"
+        f"TATSILVER Tracker\n"
+        f"Time     : {data['timestamp']}\n"
+        f"ETF Price: Rs {data['etf_price_inr']}\n"
+        f"iNAV     : Rs {data['inav_inr']}\n"
+        f"Prem/Disc: {pct:+.2f}% [{arrow}]\n"
+        f"USD/INR  : Rs {data['usd_inr']}\n"
+        f"Silver   : ${data['silver_usd_oz']}/oz\n"
+        f"Signal   : {sig}"
     )
 
 
@@ -187,7 +191,7 @@ def main():
         print("✅ Run complete.\n")
 
     except Exception as e:
-        err_msg = f"⚠️ <b>TATSILVER Tracker ERROR</b>\n{now}\n\n<code>{str(e)}</code>"
+        err_msg = f"TATSILVER Tracker ERROR\n{now}\n\n{str(e)}"
         print(f"❌ FATAL ERROR: {e}")
         traceback.print_exc()
         send_telegram(err_msg)
