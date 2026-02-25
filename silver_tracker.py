@@ -140,13 +140,17 @@ def build_telegram_message(data: dict) -> str:
 # ─────────────────────────────────────────────
 def update_csv(data: dict):
     df_new = pd.DataFrame([data])
-    if os.path.exists(CSV_FILE):
-        df_existing = pd.read_csv(CSV_FILE)
-        df = pd.concat([df_existing, df_new], ignore_index=True)
+    if os.path.exists(CSV_FILE) and os.path.getsize(CSV_FILE) > 0:
+        try:
+            df_existing = pd.read_csv(CSV_FILE)
+            df = pd.concat([df_existing, df_new], ignore_index=True)
+        except Exception as e:
+            print(f"Warning: could not read existing CSV ({e}), starting fresh.")
+            df = df_new
     else:
         df = df_new
     df.to_csv(CSV_FILE, index=False)
-    print(f"📁 CSV updated → {CSV_FILE}  (rows: {len(df)})")
+    print(f"CSV updated -> {CSV_FILE}  (rows: {len(df)})")
 
 
 # ─────────────────────────────────────────────
