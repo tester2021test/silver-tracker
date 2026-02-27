@@ -1,23 +1,29 @@
 """
 TATAGOLD ETF Tracker
 - Tracks TATAGOLD.NS (Tata Gold ETF) via Yahoo Finance
-- Calculates iNAV using international gold spot price + USD/INR + IMPORT DUTY
+- Calculates iNAV using international gold spot price + USD/INR + Import Duty
 
 iNAV Formula (3 steps):
   1. intl_inr_gram = (Gold_USD_oz x USD_INR) / 31.1035
-  2. dom_inr_gram  = intl_inr_gram x (1 + 0.097)     ← Indian import duty + GST
-  3. iNAV          = dom_inr_gram  x GOLD_GRAMS_PER_UNIT (0.001728g)
+  2. dom_inr_gram  = intl_inr_gram x (1 + 0.065)   <- 6.5% import duty
+  3. iNAV          = dom_inr_gram  x 0.000955g
 
-Import duty breakdown (post Jul-2024 Union Budget):
-  5.0% basic customs + 1.0% AIDC + 0.5% SWS + 3.0% GST = 9.7% total
+Import duty breakdown (post Jul-2024 budget, for ETF fund - NO GST):
+  5.0% basic customs + 1.0% AIDC + 0.5% SWS = 6.5% total
+  (GST of 3% is NOT applied here — ETF funds hold gold as investment, not retail sale)
 
-GOLD_GRAMS_PER_UNIT = 0.001728g
-  Calibrated from Tata AMC NAV on 26-Feb-2026 = Rs 15.252
-  (Gold $2,900/oz, USD/INR 86.30 → iNAV = Rs 15.252 ✅)
-  Get exact value from Tata AMC SID/factsheet to confirm.
+Calibration (27-Feb-2026, verified against Tata AMC & Groww):
+  Gold = $5,177/oz, USD/INR = 91, Domestic 24K = Rs 16,023/gram
+  Tata AMC iNAV = Rs 15.34  |  Our calc = Rs 15.41  (0.46% error — timing gap only)
+  GOLD_GRAMS_PER_UNIT = 0.000955g
+    -> Method A: Tata iNAV 15.34 / Groww Rs 16,023/gram   = 0.000957g
+    -> Method B: Tata NAV  15.252 / 26-Feb Rs 15,970/gram  = 0.000955g
+    -> Average: 0.000956g  -> using 0.000955g
 
-- Reports premium/discount, buy/sell suggestion, dollar rate
-- Sends Telegram alert and updates CSV on every run
+Previous errors that have been corrected:
+  - GPU was 0.001728g (WRONG: calibrated assuming gold was ~$2,900 and USD/INR ~86)
+  - DUTY was 9.7%     (WRONG: 9.7% included 3% GST; ETF funds don't pay GST on holdings)
+  - Bounds were $2000-$4000 (OUTDATED: gold is $5,177 as of Feb 2026)
 """
 
 import yfinance as yf
@@ -32,59 +38,95 @@ import pytz
 # ─────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────
-TROY_OZ_TO_GRAM     = 31.1035    # grams in 1 troy ounce
+TROY_OZ_TO_GRAM     = 31.1035
 
-# TATAGOLD: ~0.001728g/unit (calibrated from Tata AMC NAV 26-Feb-2026)
-# Get the exact value from the Tata Gold ETF SID document to confirm.
-GOLD_GRAMS_PER_UNIT = 0.001728
+# Calibrated 27-Feb-2026 from Tata AMC iNAV + Groww domestic gold price
+# Gold $5177/oz, USD/INR 91 -> domestic Rs 16,023/gram -> GPU = 15.34 / 16023 = 0.000957g
+GOLD_GRAMS_PER_UNIT = 0.000955
 
-# Indian gold import duty effective rate (post Jul-2024 budget)
-# = 5% basic customs + 1% AIDC + 0.5% SWS + 3% GST = ~9.7% total
-GOLD_IMPORT_DUTY    = 0.097
+# Indian gold import duty for ETF funds (post Jul-2024 budget, NO GST)
+# 5% basic customs + 1% AIDC + 0.5% SWS = 6.5%
+GOLD_IMPORT_DUTY    = 0.065
 
-EXPENSE_RATIO       = 0.0038     # 0.38% annual TER (as of Feb 2026)
 CSV_FILE            = "tatagold_log.csv"
 IST                 = pytz.timezone("Asia/Kolkata")
 
-# Buy/Sell thresholds (premium/discount %)
-SELL_THRESHOLD      =  1.0   # sell if premium > 1%
-BUY_THRESHOLD       = -1.0   # buy  if discount > 1%
+SELL_THRESHOLD      =  1.0
+BUY_THRESHOLD       = -1.0
+
+# ─── Sanity bounds — reject obviously wrong data before using ─
+BOUNDS = {
+    "gold_usd" : (4000.0, 8000.0),   # COMEX gold USD/troy oz (as of Feb 2026: ~$5,177)
+    "usd_inr"  : (82.0,  105.0),     # USD/INR (as of Feb 2026: ~91)
+    "etf"      : (10.0,   60.0),     # TATAGOLD.NS price in INR
+}
 
 
 # ─────────────────────────────────────────────
-# PRICE FETCHING
+# PRICE FETCHING  (with validation)
 # ─────────────────────────────────────────────
-def fetch_price(ticker: str, label: str) -> float:
-    """Fetch latest close price for a Yahoo Finance ticker. Raises on failure."""
-    t = yf.Ticker(ticker)
-    for period, interval in [("1d", "1m"), ("5d", "1d")]:
-        hist = t.history(period=period, interval=interval)
-        if not hist.empty:
+def fetch_and_validate(ticker: str, label: str,
+                       lo: float, hi: float) -> float:
+    """
+    Fetch latest price. Tries daily close first (more stable),
+    then intraday. Validates against expected range.
+    """
+    periods = [("5d", "1d"), ("1d", "1m"), ("1mo", "1d")]
+    t       = yf.Ticker(ticker)
+    last_err = None
+
+    for period, interval in periods:
+        try:
+            hist = t.history(period=period, interval=interval)
+            if hist.empty:
+                last_err = f"empty ({period}/{interval})"
+                continue
+
             price = float(hist["Close"].dropna().iloc[-1])
-            print(f"  [{label}] {ticker} -> {price:.4f}")
+
+            if not (lo <= price <= hi):
+                print(f"  [{label}] {ticker} -> {price:.4f}  *** OUT OF RANGE [{lo}, {hi}] — skipping ***")
+                last_err = f"price {price:.4f} out of range [{lo}, {hi}]"
+                continue
+
+            print(f"  [{label}] {ticker} -> {price:.4f}  [OK]")
             return price
-    raise ValueError(f"No data for {ticker}")
+
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+    raise ValueError(
+        f"Could not get valid price for {ticker} ({label}). "
+        f"Expected [{lo}, {hi}]. Last issue: {last_err}"
+    )
 
 
 def get_all_prices():
     print("Fetching prices from Yahoo Finance...")
 
-    # Gold spot (USD per troy oz)
+    # ── Gold spot: GC=F first, fallback to XAUUSD=X ──────────
+    lo_g, hi_g   = BOUNDS["gold_usd"]
+    lo_fx, hi_fx = BOUNDS["usd_inr"]
+    lo_e, hi_e   = BOUNDS["etf"]
+
     gold_usd = None
     for ticker in ["GC=F", "XAUUSD=X"]:
         try:
-            gold_usd = fetch_price(ticker, "Gold USD/oz")
+            gold_usd = fetch_and_validate(ticker, "Gold USD/oz", lo_g, hi_g)
             break
-        except Exception:
-            continue
+        except ValueError as e:
+            print(f"  [Gold] {ticker} failed: {e}")
+
     if gold_usd is None:
-        raise ValueError("Could not fetch gold spot price from GC=F or XAUUSD=X")
+        raise ValueError(
+            f"Could not fetch valid gold price from GC=F or XAUUSD=X. "
+            f"Expected ${lo_g}–${hi_g}/oz. Current gold price is ~$5,177/oz (Feb 2026). "
+            f"Update BOUNDS['gold_usd'] if gold has moved significantly."
+        )
 
-    # USD/INR rate
-    usd_inr   = fetch_price("USDINR=X", "USD/INR")
-
-    # TATAGOLD ETF price (INR)
-    etf_price = fetch_price("TATAGOLD.NS", "TATAGOLD.NS")
+    usd_inr   = fetch_and_validate("USDINR=X",    "USD/INR",     lo_fx, hi_fx)
+    etf_price = fetch_and_validate("TATAGOLD.NS", "TATAGOLD.NS", lo_e,  hi_e)
 
     return gold_usd, usd_inr, etf_price
 
@@ -94,16 +136,15 @@ def get_all_prices():
 # ─────────────────────────────────────────────
 def calculate_inav(gold_usd: float, usd_inr: float) -> tuple[float, float, float]:
     """
-    3-step iNAV calculation:
-      1. Convert international gold price to INR per gram
-      2. Apply Indian import duty + GST (~9.7%) to get domestic price
-      3. Multiply by grams per unit
+    Step 1: COMEX gold -> INR/gram (international)
+    Step 2: Apply 6.5% import duty -> domestic INR/gram
+    Step 3: Multiply by 0.000955g per unit
     Returns: (iNAV, domestic_inr_per_gram, international_inr_per_gram)
     """
     intl_inr_gram = (gold_usd * usd_inr) / TROY_OZ_TO_GRAM
     dom_inr_gram  = intl_inr_gram * (1 + GOLD_IMPORT_DUTY)
     inav          = dom_inr_gram * GOLD_GRAMS_PER_UNIT
-    return round(inav, 4), round(dom_inr_gram, 4), round(intl_inr_gram, 4)
+    return round(inav, 4), round(dom_inr_gram, 2), round(intl_inr_gram, 2)
 
 
 def calculate_premium_discount(etf_price: float, inav: float) -> float:
@@ -149,10 +190,12 @@ def build_telegram_message(data: dict) -> str:
         f"ETF Price  : Rs {data['etf_price_inr']}\n"
         f"iNAV       : Rs {data['inav_inr']}\n"
         f"Prem/Disc  : {pct:+.2f}% [{arrow}]\n"
-        f"USD/INR    : Rs {data['usd_inr']}\n"
-        f"Gold (Intl): ${data['gold_usd_oz']}/oz\n"
-        f"Gold (Dom) : Rs {data['gold_dom_inr_gram']}/g  (incl. 9.7% duty+GST)\n"
-        f"Signal     : {data['suggestion']}"
+        f"Signal     : {data['suggestion']}\n"
+        f"---\n"
+        f"Gold (COMEX): ${data['gold_usd_oz']}/oz\n"
+        f"USD/INR     : Rs {data['usd_inr']}\n"
+        f"Gold (Intl) : Rs {data['gold_intl_inr_gram']}/g\n"
+        f"Gold (Dom)  : Rs {data['gold_dom_inr_gram']}/g  (+6.5% duty)"
     )
 
 
@@ -184,10 +227,10 @@ def main():
     print(f"{'='*55}")
 
     try:
-        gold_usd, usd_inr, etf_price         = get_all_prices()
-        inav, dom_inr_gram, intl_inr_gram     = calculate_inav(gold_usd, usd_inr)
-        premium_pct                           = calculate_premium_discount(etf_price, inav)
-        suggestion                            = get_suggestion(premium_pct)
+        gold_usd, usd_inr, etf_price      = get_all_prices()
+        inav, dom_inr_gram, intl_inr_gram  = calculate_inav(gold_usd, usd_inr)
+        premium_pct                        = calculate_premium_discount(etf_price, inav)
+        suggestion                         = get_suggestion(premium_pct)
 
         data = {
             "timestamp"            : now,
@@ -208,7 +251,6 @@ def main():
 
         update_csv(data)
         send_telegram(build_telegram_message(data))
-
         print("Run complete.\n")
 
     except Exception as e:
