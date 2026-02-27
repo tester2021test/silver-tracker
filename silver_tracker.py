@@ -1,9 +1,10 @@
 """
-TATSILVER ETF Tracker
-- Tracks TATSILV.NS (Tata Silver ETF) via Yahoo Finance
-- Calculates iNAV using international silver spot price + USD/INR
-- iNAV formula: (Silver_USD_per_troy_oz x USD_INR) / 31.1035 x 0.1 gram_per_unit
-- TATSILVER: 1 unit = 0.1 gram of silver (verified from fund factsheet)
+TATAGOLD ETF Tracker
+- Tracks TATAGOLD.NS (Tata Gold ETF) via Yahoo Finance
+- Calculates iNAV using international gold spot price + USD/INR
+- iNAV formula: (Gold_USD_per_troy_oz x USD_INR) / 31.1035 x GOLD_GRAMS_PER_UNIT
+- TATAGOLD: 1 unit = 0.001 gram (1 milligram) of gold
+  (Verified: NAV 26-Feb-2026 = Rs.15.252, gold spot ~Rs.15,252/gram => 15.252/15252 = 0.001g)
 - Reports premium/discount, buy/sell suggestion, dollar rate
 - Sends Telegram alert and updates GitHub CSV on every run
 """
@@ -20,15 +21,17 @@ import pytz
 # ─────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────
-TROY_OZ_TO_GRAM     = 31.1035     # grams in 1 troy ounce
-SILVER_GRAMS_PER_UNIT = 0.1       # TATSILVER: 1 unit = 0.1 gram silver (verified from factsheet)
-EXPENSE_RATIO       = 0.0044      # 0.44% annual; used to adjust iNAV if desired
-CSV_FILE            = "tatsilver_log.csv"
-IST                 = pytz.timezone("Asia/Kolkata")
+TROY_OZ_TO_GRAM    = 31.1035     # grams in 1 troy ounce
+GOLD_GRAMS_PER_UNIT = 0.001      # TATAGOLD: 1 unit = 0.001 gram (1 milligram) of gold
+                                  # Verified: NAV 26-Feb-2026 = Rs.15.252, gold spot ~Rs.15,252/gram
+                                  # => 15.252 / 15252 = 0.001g exactly (confirmed from Tata AMC iNAV data)
+EXPENSE_RATIO      = 0.0038      # 0.38% annual (current TER as of Feb 2026)
+CSV_FILE           = "tatagold_log.csv"
+IST                = pytz.timezone("Asia/Kolkata")
 
 # Buy/Sell thresholds (premium/discount %)
-SELL_THRESHOLD      =  1.0   # sell if premium > 1%
-BUY_THRESHOLD       = -1.0   # buy  if discount > 1%
+SELL_THRESHOLD     =  1.0   # sell if premium > 1%
+BUY_THRESHOLD      = -1.0   # buy  if discount > 1%
 
 
 # ─────────────────────────────────────────────
@@ -50,37 +53,37 @@ def fetch_price(ticker: str, label: str) -> float:
 def get_all_prices():
     print("📡 Fetching prices from Yahoo Finance...")
 
-    # Silver spot (USD per troy oz)
-    silver_usd = None
-    for ticker in ["SI=F", "XAGUSD=X"]:
+    # Gold spot (USD per troy oz)
+    gold_usd = None
+    for ticker in ["GC=F", "XAUUSD=X"]:
         try:
-            silver_usd = fetch_price(ticker, "Silver USD/oz")
+            gold_usd = fetch_price(ticker, "Gold USD/oz")
             break
         except Exception:
             continue
-    if silver_usd is None:
-        raise ValueError("Could not fetch silver spot price from SI=F or XAGUSD=X")
+    if gold_usd is None:
+        raise ValueError("Could not fetch gold spot price from GC=F or XAUUSD=X")
 
     # USD/INR rate
     usd_inr = fetch_price("USDINR=X", "USD/INR")
 
-    # TATSILVER ETF price (INR)
-    etf_price = fetch_price("TATSILV.NS", "TATSILV.NS")
+    # TATAGOLD ETF price (INR)
+    etf_price = fetch_price("TATAGOLD.NS", "TATAGOLD.NS")
 
-    return silver_usd, usd_inr, etf_price
+    return gold_usd, usd_inr, etf_price
 
 
 # ─────────────────────────────────────────────
 # iNAV CALCULATION
 # ─────────────────────────────────────────────
-def calculate_inav(silver_usd: float, usd_inr: float) -> tuple[float, float]:
+def calculate_inav(gold_usd: float, usd_inr: float) -> tuple[float, float]:
     """
-    iNAV (₹ per unit) = silver price in INR per gram × grams per unit
-    Silver in INR/gram = (Silver_USD/troy_oz × USD/INR) / 31.1035
+    iNAV (Rs per unit) = gold price in INR per gram x grams per unit
+    Gold in INR/gram = (Gold_USD/troy_oz x USD/INR) / 31.1035
     """
-    silver_inr_per_gram = (silver_usd * usd_inr) / TROY_OZ_TO_GRAM
-    inav = silver_inr_per_gram * SILVER_GRAMS_PER_UNIT
-    return round(inav, 4), round(silver_inr_per_gram, 4)
+    gold_inr_per_gram = (gold_usd * usd_inr) / TROY_OZ_TO_GRAM
+    inav = gold_inr_per_gram * GOLD_GRAMS_PER_UNIT
+    return round(inav, 4), round(gold_inr_per_gram, 4)
 
 
 def calculate_premium_discount(etf_price: float, inav: float) -> float:
@@ -89,11 +92,11 @@ def calculate_premium_discount(etf_price: float, inav: float) -> float:
 
 def get_suggestion(premium_pct: float) -> str:
     if premium_pct > SELL_THRESHOLD:
-        return f"🔴 SELL  (Premium +{premium_pct:.2f}% > {SELL_THRESHOLD}%)"
+        return f"SELL  (Premium +{premium_pct:.2f}% > {SELL_THRESHOLD}%)"
     elif premium_pct < BUY_THRESHOLD:
-        return f"🟢 BUY   (Discount {premium_pct:.2f}% < {BUY_THRESHOLD}%)"
+        return f"BUY   (Discount {premium_pct:.2f}% < {BUY_THRESHOLD}%)"
     else:
-        return f"🟡 HOLD  (Near Fair Value: {premium_pct:+.2f}%)"
+        return f"HOLD  (Near Fair Value: {premium_pct:+.2f}%)"
 
 
 # ─────────────────────────────────────────────
@@ -106,14 +109,13 @@ def send_telegram(message: str):
         print("Warning: Telegram credentials missing - skipping notification.")
         return
     url     = f"https://api.telegram.org/bot{token}/sendMessage"
-    # No parse_mode - plain text avoids 400 errors from special chars (rupee, emojis in tags)
+    # No parse_mode - plain text avoids 400 errors from special chars
     payload = {"chat_id": chat_id, "text": message}
     try:
         resp = requests.post(url, json=payload, timeout=15)
         resp.raise_for_status()
         print(f"Telegram sent OK (status {resp.status_code})")
     except requests.exceptions.HTTPError as e:
-        # Print full response body for easier debugging
         print(f"Telegram HTTP error: {e} | Response: {resp.text}")
     except Exception as e:
         print(f"Telegram error: {e}")
@@ -124,13 +126,13 @@ def build_telegram_message(data: dict) -> str:
     arrow = "UP" if pct > 0 else "DN"
     sig   = data["suggestion"]
     return (
-        f"TATSILVER Tracker\n"
+        f"TATAGOLD Tracker\n"
         f"Time     : {data['timestamp']}\n"
         f"ETF Price: Rs {data['etf_price_inr']}\n"
         f"iNAV     : Rs {data['inav_inr']}\n"
         f"Prem/Disc: {pct:+.2f}% [{arrow}]\n"
         f"USD/INR  : Rs {data['usd_inr']}\n"
-        f"Silver   : ${data['silver_usd_oz']}/oz\n"
+        f"Gold     : ${data['gold_usd_oz']}/oz\n"
         f"Signal   : {sig}"
     )
 
@@ -159,23 +161,23 @@ def update_csv(data: dict):
 def main():
     now = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     print(f"\n{'='*50}")
-    print(f"  TATSILVER Tracker  |  {now}")
+    print(f"  TATAGOLD Tracker  |  {now}")
     print(f"{'='*50}")
 
     try:
-        silver_usd, usd_inr, etf_price = get_all_prices()
-        inav, silver_inr_gram          = calculate_inav(silver_usd, usd_inr)
-        premium_pct                    = calculate_premium_discount(etf_price, inav)
-        suggestion                     = get_suggestion(premium_pct)
+        gold_usd, usd_inr, etf_price = get_all_prices()
+        inav, gold_inr_gram          = calculate_inav(gold_usd, usd_inr)
+        premium_pct                  = calculate_premium_discount(etf_price, inav)
+        suggestion                   = get_suggestion(premium_pct)
 
         data = {
             "timestamp"           : now,
-            "etf_price_inr"       : round(etf_price,      2),
-            "inav_inr"            : round(inav,            2),
-            "premium_discount_pct": round(premium_pct,     3),
-            "silver_usd_oz"       : round(silver_usd,      4),
-            "usd_inr"             : round(usd_inr,         4),
-            "silver_inr_gram"     : round(silver_inr_gram, 4),
+            "etf_price_inr"       : round(etf_price,    2),
+            "inav_inr"            : round(inav,          2),
+            "premium_discount_pct": round(premium_pct,   3),
+            "gold_usd_oz"         : round(gold_usd,      4),
+            "usd_inr"             : round(usd_inr,       4),
+            "gold_inr_gram"       : round(gold_inr_gram, 4),
             "suggestion"          : suggestion,
         }
 
@@ -192,11 +194,11 @@ def main():
         msg = build_telegram_message(data)
         send_telegram(msg)
 
-        print("✅ Run complete.\n")
+        print("Run complete.\n")
 
     except Exception as e:
-        err_msg = f"TATSILVER Tracker ERROR\n{now}\n\n{str(e)}"
-        print(f"❌ FATAL ERROR: {e}")
+        err_msg = f"TATAGOLD Tracker ERROR\n{now}\n\n{str(e)}"
+        print(f"FATAL ERROR: {e}")
         traceback.print_exc()
         send_telegram(err_msg)
         sys.exit(1)
