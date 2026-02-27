@@ -1,12 +1,23 @@
 """
 TATAGOLD ETF Tracker
 - Tracks TATAGOLD.NS (Tata Gold ETF) via Yahoo Finance
-- Calculates iNAV using international gold spot price + USD/INR
-- iNAV formula: (Gold_USD_per_troy_oz x USD_INR) / 31.1035 x GOLD_GRAMS_PER_UNIT
-- TATAGOLD: 1 unit = 0.001 gram (1 milligram) of gold
-  (Verified: NAV 26-Feb-2026 = Rs.15.252, gold spot ~Rs.15,252/gram => 15.252/15252 = 0.001g)
+- Calculates iNAV using international gold spot price + USD/INR + IMPORT DUTY
+
+iNAV Formula (3 steps):
+  1. intl_inr_gram = (Gold_USD_oz x USD_INR) / 31.1035
+  2. dom_inr_gram  = intl_inr_gram x (1 + 0.097)     ← Indian import duty + GST
+  3. iNAV          = dom_inr_gram  x GOLD_GRAMS_PER_UNIT (0.001728g)
+
+Import duty breakdown (post Jul-2024 Union Budget):
+  5.0% basic customs + 1.0% AIDC + 0.5% SWS + 3.0% GST = 9.7% total
+
+GOLD_GRAMS_PER_UNIT = 0.001728g
+  Calibrated from Tata AMC NAV on 26-Feb-2026 = Rs 15.252
+  (Gold $2,900/oz, USD/INR 86.30 → iNAV = Rs 15.252 ✅)
+  Get exact value from Tata AMC SID/factsheet to confirm.
+
 - Reports premium/discount, buy/sell suggestion, dollar rate
-- Sends Telegram alert and updates GitHub CSV on every run
+- Sends Telegram alert and updates CSV on every run
 """
 
 import yfinance as yf
@@ -21,17 +32,23 @@ import pytz
 # ─────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────
-TROY_OZ_TO_GRAM    = 31.1035     # grams in 1 troy ounce
-GOLD_GRAMS_PER_UNIT = 0.001      # TATAGOLD: 1 unit = 0.001 gram (1 milligram) of gold
-                                  # Verified: NAV 26-Feb-2026 = Rs.15.252, gold spot ~Rs.15,252/gram
-                                  # => 15.252 / 15252 = 0.001g exactly (confirmed from Tata AMC iNAV data)
-EXPENSE_RATIO      = 0.0038      # 0.38% annual (current TER as of Feb 2026)
-CSV_FILE           = "tatagold_log.csv"
-IST                = pytz.timezone("Asia/Kolkata")
+TROY_OZ_TO_GRAM     = 31.1035    # grams in 1 troy ounce
+
+# TATAGOLD: ~0.001728g/unit (calibrated from Tata AMC NAV 26-Feb-2026)
+# Get the exact value from the Tata Gold ETF SID document to confirm.
+GOLD_GRAMS_PER_UNIT = 0.001728
+
+# Indian gold import duty effective rate (post Jul-2024 budget)
+# = 5% basic customs + 1% AIDC + 0.5% SWS + 3% GST = ~9.7% total
+GOLD_IMPORT_DUTY    = 0.097
+
+EXPENSE_RATIO       = 0.0038     # 0.38% annual TER (as of Feb 2026)
+CSV_FILE            = "tatagold_log.csv"
+IST                 = pytz.timezone("Asia/Kolkata")
 
 # Buy/Sell thresholds (premium/discount %)
-SELL_THRESHOLD     =  1.0   # sell if premium > 1%
-BUY_THRESHOLD      = -1.0   # buy  if discount > 1%
+SELL_THRESHOLD      =  1.0   # sell if premium > 1%
+BUY_THRESHOLD       = -1.0   # buy  if discount > 1%
 
 
 # ─────────────────────────────────────────────
@@ -40,18 +57,17 @@ BUY_THRESHOLD      = -1.0   # buy  if discount > 1%
 def fetch_price(ticker: str, label: str) -> float:
     """Fetch latest close price for a Yahoo Finance ticker. Raises on failure."""
     t = yf.Ticker(ticker)
-    # Try 1-min intraday first, fallback to daily
     for period, interval in [("1d", "1m"), ("5d", "1d")]:
         hist = t.history(period=period, interval=interval)
         if not hist.empty:
             price = float(hist["Close"].dropna().iloc[-1])
-            print(f"  [{label}] {ticker} → {price:.4f}")
+            print(f"  [{label}] {ticker} -> {price:.4f}")
             return price
     raise ValueError(f"No data for {ticker}")
 
 
 def get_all_prices():
-    print("📡 Fetching prices from Yahoo Finance...")
+    print("Fetching prices from Yahoo Finance...")
 
     # Gold spot (USD per troy oz)
     gold_usd = None
@@ -65,7 +81,7 @@ def get_all_prices():
         raise ValueError("Could not fetch gold spot price from GC=F or XAUUSD=X")
 
     # USD/INR rate
-    usd_inr = fetch_price("USDINR=X", "USD/INR")
+    usd_inr   = fetch_price("USDINR=X", "USD/INR")
 
     # TATAGOLD ETF price (INR)
     etf_price = fetch_price("TATAGOLD.NS", "TATAGOLD.NS")
@@ -76,14 +92,18 @@ def get_all_prices():
 # ─────────────────────────────────────────────
 # iNAV CALCULATION
 # ─────────────────────────────────────────────
-def calculate_inav(gold_usd: float, usd_inr: float) -> tuple[float, float]:
+def calculate_inav(gold_usd: float, usd_inr: float) -> tuple[float, float, float]:
     """
-    iNAV (Rs per unit) = gold price in INR per gram x grams per unit
-    Gold in INR/gram = (Gold_USD/troy_oz x USD/INR) / 31.1035
+    3-step iNAV calculation:
+      1. Convert international gold price to INR per gram
+      2. Apply Indian import duty + GST (~9.7%) to get domestic price
+      3. Multiply by grams per unit
+    Returns: (iNAV, domestic_inr_per_gram, international_inr_per_gram)
     """
-    gold_inr_per_gram = (gold_usd * usd_inr) / TROY_OZ_TO_GRAM
-    inav = gold_inr_per_gram * GOLD_GRAMS_PER_UNIT
-    return round(inav, 4), round(gold_inr_per_gram, 4)
+    intl_inr_gram = (gold_usd * usd_inr) / TROY_OZ_TO_GRAM
+    dom_inr_gram  = intl_inr_gram * (1 + GOLD_IMPORT_DUTY)
+    inav          = dom_inr_gram * GOLD_GRAMS_PER_UNIT
+    return round(inav, 4), round(dom_inr_gram, 4), round(intl_inr_gram, 4)
 
 
 def calculate_premium_discount(etf_price: float, inav: float) -> float:
@@ -109,7 +129,6 @@ def send_telegram(message: str):
         print("Warning: Telegram credentials missing - skipping notification.")
         return
     url     = f"https://api.telegram.org/bot{token}/sendMessage"
-    # No parse_mode - plain text avoids 400 errors from special chars
     payload = {"chat_id": chat_id, "text": message}
     try:
         resp = requests.post(url, json=payload, timeout=15)
@@ -124,16 +143,16 @@ def send_telegram(message: str):
 def build_telegram_message(data: dict) -> str:
     pct   = data["premium_discount_pct"]
     arrow = "UP" if pct > 0 else "DN"
-    sig   = data["suggestion"]
     return (
         f"TATAGOLD Tracker\n"
-        f"Time     : {data['timestamp']}\n"
-        f"ETF Price: Rs {data['etf_price_inr']}\n"
-        f"iNAV     : Rs {data['inav_inr']}\n"
-        f"Prem/Disc: {pct:+.2f}% [{arrow}]\n"
-        f"USD/INR  : Rs {data['usd_inr']}\n"
-        f"Gold     : ${data['gold_usd_oz']}/oz\n"
-        f"Signal   : {sig}"
+        f"Time       : {data['timestamp']}\n"
+        f"ETF Price  : Rs {data['etf_price_inr']}\n"
+        f"iNAV       : Rs {data['inav_inr']}\n"
+        f"Prem/Disc  : {pct:+.2f}% [{arrow}]\n"
+        f"USD/INR    : Rs {data['usd_inr']}\n"
+        f"Gold (Intl): ${data['gold_usd_oz']}/oz\n"
+        f"Gold (Dom) : Rs {data['gold_dom_inr_gram']}/g  (incl. 9.7% duty+GST)\n"
+        f"Signal     : {data['suggestion']}"
     )
 
 
@@ -160,39 +179,35 @@ def update_csv(data: dict):
 # ─────────────────────────────────────────────
 def main():
     now = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
-    print(f"\n{'='*50}")
+    print(f"\n{'='*55}")
     print(f"  TATAGOLD Tracker  |  {now}")
-    print(f"{'='*50}")
+    print(f"{'='*55}")
 
     try:
-        gold_usd, usd_inr, etf_price = get_all_prices()
-        inav, gold_inr_gram          = calculate_inav(gold_usd, usd_inr)
-        premium_pct                  = calculate_premium_discount(etf_price, inav)
-        suggestion                   = get_suggestion(premium_pct)
+        gold_usd, usd_inr, etf_price         = get_all_prices()
+        inav, dom_inr_gram, intl_inr_gram     = calculate_inav(gold_usd, usd_inr)
+        premium_pct                           = calculate_premium_discount(etf_price, inav)
+        suggestion                            = get_suggestion(premium_pct)
 
         data = {
-            "timestamp"           : now,
-            "etf_price_inr"       : round(etf_price,    2),
-            "inav_inr"            : round(inav,          2),
-            "premium_discount_pct": round(premium_pct,   3),
-            "gold_usd_oz"         : round(gold_usd,      4),
-            "usd_inr"             : round(usd_inr,       4),
-            "gold_inr_gram"       : round(gold_inr_gram, 4),
-            "suggestion"          : suggestion,
+            "timestamp"            : now,
+            "etf_price_inr"        : round(etf_price,      2),
+            "inav_inr"             : round(inav,            4),
+            "premium_discount_pct" : round(premium_pct,     3),
+            "gold_usd_oz"          : round(gold_usd,        4),
+            "usd_inr"              : round(usd_inr,         4),
+            "gold_intl_inr_gram"   : round(intl_inr_gram,   2),
+            "gold_dom_inr_gram"    : round(dom_inr_gram,    2),
+            "suggestion"           : suggestion,
         }
 
-        # Print summary
-        print(f"\n{'─'*40}")
+        print(f"\n{'─'*45}")
         for k, v in data.items():
             print(f"  {k:<25}: {v}")
-        print(f"{'─'*40}\n")
+        print(f"{'─'*45}\n")
 
-        # Update CSV
         update_csv(data)
-
-        # Send Telegram
-        msg = build_telegram_message(data)
-        send_telegram(msg)
+        send_telegram(build_telegram_message(data))
 
         print("Run complete.\n")
 
